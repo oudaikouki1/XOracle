@@ -44,6 +44,18 @@ english_frequencies = {
     " ": 0.13000,
 }
 
+SPACE_SHARE = 0.15
+OTHER_SHARE = 0.02
+
+letter_total = sum(f for c, f in english_frequencies.items() if c in string.ascii_lowercase)
+CHI_TABLE = {
+    c: f / letter_total * (1 - SPACE_SHARE - OTHER_SHARE)
+    for c, f in english_frequencies.items()
+    if c in string.ascii_lowercase
+}
+CHI_TABLE[" "] = SPACE_SHARE
+CHI_TABLE["other"] = OTHER_SHARE
+
 def frequency_score(data: bytes) -> float:
     score = 0
     for ch in data:
@@ -57,3 +69,30 @@ def frequency_score(data: bytes) -> float:
             
     return score
 
+def chi_squared_score(data: bytes) -> float:
+    # Count the frequency of each character in the data
+    observed_frequencies = {}
+    for ch in data:
+        if (ch < 0x20 and ch not in (0x09, 0x0A, 0x0D)) or ch > 0x7E:
+            return float('inf')
+        c = chr(ch).lower()
+        if c in string.ascii_lowercase or c == " ":
+            observed_frequencies[c] = observed_frequencies.get(c, 0) + 1
+        else:
+            observed_frequencies["other"] = observed_frequencies.get("other", 0) + 1
+    # Calculate the expected frequencies based on English text
+    total_chars = sum(observed_frequencies.values())
+    if total_chars == 0:
+        return float('inf')  # Avoid division by zero if no valid characters are found
+    expected_frequencies = {char: freq * total_chars for char, freq in CHI_TABLE.items()}
+
+    # Calculate the chi-squared statistic
+    chi_squared = 0.0
+    for char, expected in expected_frequencies.items():
+        observed = observed_frequencies.get(char, 0)
+        if expected > 0:
+            chi_squared += (observed - expected) ** 2 / expected
+
+    return chi_squared
+
+    

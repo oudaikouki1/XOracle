@@ -34,10 +34,10 @@ If the key is shorter than the data, it repeats. That repetition, together with 
 ## Roadmap
 
 - [x] **Phase 1: Core cipher.** `xor_bytes(data, key)` with single-byte, repeating and full-length keys.
-- [ ] **Phase 2: Break single-byte XOR.** Brute-force all 256 keys and rank the candidates with an English-likeness score.
+- [x] **Phase 2: Break single-byte XOR.** Brute-force all 256 keys and rank the candidates with an English-likeness score.
   - [x] v1: character-class scoring (letters, spaces, garbage penalty)
   - [x] v2: letter-frequency scoring
-  - [ ] v3: chi-squared test
+  - [x] v3: chi-squared test
 - [ ] **Phase 3: Break repeating-key XOR.** Guess the key length with Hamming distance, then split the problem into single-byte columns.
 - [ ] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
 - [ ] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
@@ -51,8 +51,8 @@ If the key is shorter than the data, it repeats. That repetition, together with 
 ```
 XOracle/
 ├── core.py        # xor_bytes: the XOR primitive
-├── scoring.py     # english_score: how English-like is a byte string?
-├── test.py        # experiments and checks
+├── scoring.py     # english_score, frequency_score, chi_squared_score
+├── test.py        # cracks test sentences with every scorer and compares them
 └── README.md
 ```
 
@@ -78,20 +78,39 @@ python test.py
 
 Test setup: three English sentences encrypted with key `0x58`. Every candidate key 0–255 is tried and each decryption is ranked with a scorer.
 
-**v1 (character-class scorer):** lowercase/space +2, uppercase +1, common punctuation 0, anything else −5. It recovers `0x58` in first place for all test sentences, including all-caps text and text with digits.
+Three scorers, each one built to fix the weaknesses found in the one before:
 
-**v2 (letter-frequency scorer):** each letter adds its frequency in English (e.g. `e` ≈ 0.127, `z` ≈ 0.0007), and garbage bytes are penalised.
+- **v1, character classes:** lowercase/space +2, uppercase +1, common punctuation 0, anything else −5. Higher is better.
+- **v2, letter frequency:** each letter adds its frequency in English (`e` ≈ 0.127, `z` ≈ 0.0007); non-printable bytes −0.5. Higher is better.
+- **v3, chi-squared:** compares the whole character distribution (26 letters + space + "other") with English. Control or non-ASCII bytes are rejected outright. Lower is better.
 
-Head-to-head on the hardest sentence, `I tried to stop smoking 125970 times`, comparing the real key with the best impostor (key `0x47`, which decrypts to `V?kmvz{?kp?lkpo?lrptvqx?.-*&(/?kvrzl`):
+#### Results (`python test.py`)
 
-| Scorer | Real text | Runner-up | Separation (ratio) |
+Separation = how many times better the correct key scores than **that scorer's own** best wrong key. The scorers use different scales, so the ratio is the fair comparison. For chi-squared it's computed as impostor / real.
+
+| Sentence | v1 | v2 | v3 |
 |---|---|---|---|
-| v1: character classes | 29 | 20 | 1.45× |
-| v2: letter frequency | 2.41 | 0.65 | **3.7×** |
+| `I LOVE WORKING OUT` | #1, 1.40× | #1, 1.53× | #1, **3.48×** |
+| `I WANT TO BE THE BEST IN THE WORLD` | #1, 1.62× | #1, 1.92× | #1, **5.79×** |
+| `I tried to stop smoking 125970 times` | #1, 1.45× | #1, 1.84× | #1, **3.83×** |
 
-The two scorers use different scales, so I compare the **ratio** between the real text and the runner-up rather than the raw difference.
+All three scorers find the key, but v3 does it with about 2–3× more margin than v1 and v2. That margin matters for Phase 3, where each column of ciphertext is short and a weak scorer starts picking wrong bytes.
 
-**Why v2 wins:** v1 rewards `k`, `v`, `z` and `q` as much as `e` and `t`, so a string of random letters looks like English. v2 gives rare letters almost nothing, and the impostor is full of them.
+#### How each version improved on the last
+
+- **v1 → v2:** v1 rewards `k`, `v`, `z` and `q` as much as `e` and `t`, so a string of random letters looks like English. v2 gives rare letters almost nothing.
+- **v2 → v3:** v2 *adds up* rewards, so a candidate can score well with a few lucky common letters. Chi-squared checks whether the *proportions* match English, so too many `e`s, too few spaces or too many symbols all cost points.
+
+#### Getting chi-squared right took four fixes
+
+My first v3 put the correct key at **#129–#142**. Each fix came from reading what was beating it:
+
+1. **Pure garbage scored a perfect 0.** With no letters to count, every term was skipped. Fix: return `inf` when there's nothing to count.
+2. **The case-flip key nearly won.** XOR with `0x78` turns `WANT` into `want` (invisible after `.lower()`) and spaces into `\x00` (ignored). Fix: reject control and non-ASCII bytes.
+3. **Few letters plus lots of symbols won.** Only letters were counted, so `,E)*3 E2*7.,+"E*01` was judged on 4 letters. Fix: count every byte, with symbols in an `"other"` category.
+4. **Expected counts didn't add up.** The table had no `"other"` entry and didn't sum to 1. Fix: rescale letters to 83%, space 15%, other 2%.
+
+**Known limit:** on very short ciphertexts (e.g. `Hi`), no frequency-based scorer can decide: `No`, `On` and `Hi` are all plausible. Frequency analysis needs enough text.
 
 **What I learned along the way**
 - `sorted()` is ascending by default, so my first run printed the three *worst* keys. They were consecutive (3, 4, 5) because they tied at the minimum score and `sorted()` keeps ties in their original order.
@@ -108,7 +127,9 @@ The two scorers use different scales, so I compare the **ratio** between the rea
 - A 256-key space is not security: brute force takes milliseconds.
 - To recognise the right answer, you only need the plaintext to be *statistically different* from noise.
 - A scorer that checks *which kind* of character appears is weak. One that checks *how often each letter appears* is much stronger, because English has a fingerprint (ETAOIN SHRDLU).
-- Measure improvements. A before/after number (1.45× → 3.7×) beats "it seems better".
+- Measure improvements. A before/after number beats "it seems better".
+- Compare fairly: measure each method against its *own* best competitor, not against one picked for another method.
+- When a scorer fails, print what beat it. Every fix to chi-squared came from reading the winning impostor.
 
 ---
 
@@ -124,6 +145,3 @@ The two scorers use different scales, so I compare the **ratio** between the rea
 
 Everything here is for learning. All attacks are tested only on data I generated and encrypted myself.
 
-## License
-
-MIT
