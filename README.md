@@ -36,7 +36,7 @@ If the key is shorter than the data, it repeats. That repetition, together with 
 - [x] **Phase 1: Core cipher.** `xor_bytes(data, key)` with single-byte, repeating and full-length keys.
 - [ ] **Phase 2: Break single-byte XOR.** Brute-force all 256 keys and rank the candidates with an English-likeness score.
   - [x] v1: character-class scoring (letters, spaces, garbage penalty)
-  - [ ] v2: letter-frequency scoring
+  - [x] v2: letter-frequency scoring
   - [ ] v3: chi-squared test
 - [ ] **Phase 3: Break repeating-key XOR.** Guess the key length with Hamming distance, then split the problem into single-byte columns.
 - [ ] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
@@ -74,9 +74,30 @@ python test.py
 
 ## Results so far
 
-**Phase 2 v1:** with a simple character-class scorer, the brute-force attack recovers the correct key (`0x58`) in first place for all test sentences, including all-caps text and text with digits.
+### Phase 2: breaking single-byte XOR
 
-**What I learned:** `sorted()` is ascending by default, so my first run printed the *worst* keys. I also found that v1 mostly tells English from garbage by the spaces. Wrong keys that keep letters as letters score close to the real one, which is why v2 uses letter frequencies.
+Test setup: three English sentences encrypted with key `0x58`. Every candidate key 0–255 is tried and each decryption is ranked with a scorer.
+
+**v1 (character-class scorer):** lowercase/space +2, uppercase +1, common punctuation 0, anything else −5. It recovers `0x58` in first place for all test sentences, including all-caps text and text with digits.
+
+**v2 (letter-frequency scorer):** each letter adds its frequency in English (e.g. `e` ≈ 0.127, `z` ≈ 0.0007), and garbage bytes are penalised.
+
+Head-to-head on the hardest sentence, `I tried to stop smoking 125970 times`, comparing the real key with the best impostor (key `0x47`, which decrypts to `V?kmvz{?kp?lkpo?lrptvqx?.-*&(/?kvrzl`):
+
+| Scorer | Real text | Runner-up | Separation (ratio) |
+|---|---|---|---|
+| v1: character classes | 29 | 20 | 1.45× |
+| v2: letter frequency | 2.41 | 0.65 | **3.7×** |
+
+The two scorers use different scales, so I compare the **ratio** between the real text and the runner-up rather than the raw difference.
+
+**Why v2 wins:** v1 rewards `k`, `v`, `z` and `q` as much as `e` and `t`, so a string of random letters looks like English. v2 gives rare letters almost nothing, and the impostor is full of them.
+
+**What I learned along the way**
+- `sorted()` is ascending by default, so my first run printed the three *worst* keys. They were consecutive (3, 4, 5) because they tied at the minimum score and `sorted()` keeps ties in their original order.
+- v1 told English from garbage mostly by the **spaces**: under the wrong key, spaces became `?`, which my scorer treated as neutral punctuation.
+- Penalties only mean something relative to rewards. Switching the frequency table from percent to fractions left the old −5 penalty about 40× bigger than the best letter's reward.
+- Text with digits is the hardest case: the real plaintext pays a penalty for its digits, while the wrong key turns them into neutral punctuation.
 
 ---
 
@@ -86,6 +107,8 @@ python test.py
 
 - A 256-key space is not security: brute force takes milliseconds.
 - To recognise the right answer, you only need the plaintext to be *statistically different* from noise.
+- A scorer that checks *which kind* of character appears is weak. One that checks *how often each letter appears* is much stronger, because English has a fingerprint (ETAOIN SHRDLU).
+- Measure improvements. A before/after number (1.45× → 3.7×) beats "it seems better".
 
 ---
 
