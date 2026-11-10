@@ -2,6 +2,9 @@
 
 from core import xor_bytes
 from scoring import english_score, frequency_score, chi_squared_score
+from single_byte import crack
+from repeating import transpose
+from single_byte import best_key
 
 KEY = 0x58
 
@@ -19,14 +22,6 @@ SCORERS = [
 ]
 
 
-def crack(cipher: bytes, scorer, higher_is_better: bool) -> list:
-    """Try all 256 keys; return (key, score, plaintext) sorted best first."""
-    results = []
-    for k in range(256):
-        plain = xor_bytes(cipher, bytes([k]))
-        results.append((k, scorer(plain), plain))
-    results.sort(key=lambda r: r[1], reverse=higher_is_better)
-    return results
 
 
 def separation(real: float, impostor: float, higher_is_better: bool) -> str:

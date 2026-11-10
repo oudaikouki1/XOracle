@@ -73,7 +73,7 @@ def chi_squared_score(data: bytes) -> float:
     # Count the frequency of each character in the data
     observed_frequencies = {}
     for ch in data:
-        if (ch < 0x20 and ch not in (0x09, 0x0A, 0x0D)) or ch > 0x7E:
+        if (ch < 0x20 and ch not in (0x09, 0x0A, 0x0D)):
             return float('inf')
         c = chr(ch).lower()
         if c in string.ascii_lowercase or c == " ":
