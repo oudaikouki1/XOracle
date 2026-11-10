@@ -65,7 +65,7 @@ XOracle/
 ├── scoring.py      # english_score, frequency_score, chi_squared_score
 ├── single_byte.py  # crack, best_key: Phase 2 single-byte breaker
 ├── repeating.py    # hamming_distance, keysize_score, guess_keysizes, transpose,
-│                   # shortest_period, recover_key, break_repeating_xor
+│                   # recover_key, break_repeating_xor
 ├── known_plain.py  # SIGNATURES, KNOWN_PARTS, keystream_from_header, find_period,
 │                   # recover_with_signature, identify_filetype,
 │                   # known_keystream, key_for_length, recover_long_key
@@ -151,8 +151,7 @@ ciphertext
   ├─ 1. guess_keysizes    which key lengths are likely?        (Hamming distance)
   ├─ 2. transpose         one column per key byte
   ├─ 3. best_key          break each column as single-byte XOR  (Phase 2, chi-squared)
-  ├─ 4. shortest_period   ICEICEICE → ICE
-  └─ 5. pick the winner   decrypt with each candidate, score with chi-squared
+  └─ 4. pick the winner   decrypt with each candidate, score with chi-squared
                           → shortest key within 10% of the best score
 ```
 
