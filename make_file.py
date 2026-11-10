@@ -1,74 +1,136 @@
-from core import xor_bytes
-from known_plain import SIGNATURES, keystream_from_header,find_period, recover_long_key, recover_with_signature,identify_filetype,known_keystream,KNOWN_PARTS
+"""Phase 4 experiments: known-plaintext attack on encrypted files.
+
+Running this file:
+  1. encrypts samples/img.png and samples/sample.pdf with known keys and saves them,
+  2. checks the encryption round-trips and that the originals carry their signatures,
+  3. runs the header-only attack (keystream, period, file-type identification),
+  4. runs the long-key attack (start + IEND bytes) on random keys of growing length.
+"""
+
 import random
 
+from core import xor_bytes
+from known_plain import (
+    KNOWN_PARTS,
+    SIGNATURES,
+    find_period,
+    identify_filetype,
+    keystream_from_header,
+    known_keystream,
+    recover_long_key,
+    recover_with_signature,
+)
+
+PNG_PATH = "./samples/img.png"
+PDF_PATH = "./samples/sample.pdf"
+PNG_OUT = "./samples/encrypted.png.enc"
+PDF_OUT = "./samples/encrypted.pdf.enc"
+
+# 13 bytes: longer than the 8-byte PNG signature, so the header-only attack
+# can't see it repeat, but the long-key attack (28 known bytes) can.
+PNG_KEY = b"XORacleISGOOD"
+# 3 bytes: shorter than "%PDF-", so the header alone reveals it.
+PDF_KEY = b"key"
+
+LONG_KEY_LENGTHS = [7, 12, 16, 20, 24, 28, 29, 35]
+SEED = 42                     # fixed seed: same random keys every run
 
 
+# ------------------------------------------------------------------ helpers
+
+def read_bytes(path: str) -> bytes:
+    with open(path, "rb") as file:
+        return file.read()
 
 
+def write_bytes(path: str, data: bytes) -> None:
+    with open(path, "wb") as file:
+        file.write(data)
 
 
-with open("./samples/img.png","rb") as file:
-    data_png = file.read()
+# ------------------------------------------------------------------- steps
 
-KEY1 = b"XORacleISGOOD"
-encrypted_png = xor_bytes(data_png,KEY1)
+def encrypt_samples() -> tuple[bytes, bytes, bytes, bytes]:
+    """Encrypt the sample PNG and PDF, save the results, and check that
+    decrypting gives back the originals.
 
-with open("./samples/encrypted.png.enc", "wb") as file: 
-    file.write(encrypted_png)
- 
-with open("./samples/sample.pdf", "rb") as file:
-    data_pdf = file.read()
+    Returns (png, encrypted_png, pdf, encrypted_pdf).
+    """
+    png = read_bytes(PNG_PATH)
+    pdf = read_bytes(PDF_PATH)
+    encrypted_png = xor_bytes(png, PNG_KEY)
+    encrypted_pdf = xor_bytes(pdf, PDF_KEY)
+    write_bytes(PNG_OUT, encrypted_png)
+    write_bytes(PDF_OUT, encrypted_pdf)
 
-KEY2 = b"key"
-encrypted_pdf = xor_bytes(data_pdf,KEY2) 
-
-with open("./samples/encrypted.pdf.enc", "wb") as file: 
-    file.write(encrypted_pdf)
-
-#checkpoint step 1
-decrypted_png = xor_bytes(encrypted_png,KEY1)
-decrypted_pdf = xor_bytes(encrypted_pdf,KEY2)
-
-print(f"comparison of real and decrypted png = {data_png == decrypted_png}")
-print(f"comparison of real and decrypted pdf = {data_pdf == decrypted_pdf}")
-
-#checkpoint step 2
-print(f"Verification of PNG File : {data_png.startswith(SIGNATURES["png"])}")
-print(f"Verification of PDF File : {data_pdf.startswith(SIGNATURES["pdf"])}")
-
-#checkpoint step 3 
-print(f"KEY : {keystream_from_header(encrypted_png,SIGNATURES["png"])}")
-print(f"KEY : {keystream_from_header(encrypted_pdf,SIGNATURES["pdf"])}")
-
-#checkpoint step 4
-print(find_period(b"XORacleX"))  # 7
-print(find_period(b"keyke"))     # 3
-print(find_period(b"abcdefgh"))  # 8
-
-#chekpoint step 5 
-#key, plain = recover_with_signature(encrypted_png,"png")
-#print(f"Recovered Key : {key}")
-
-#experiment identify
-for ftype, header in SIGNATURES.items():
-    keystream = keystream_from_header(encrypted_png, header)
-    print(f"File type: {ftype}, Keystream: {keystream}, Period: {find_period(keystream)}")
+    print("PNG round-trips:", xor_bytes(encrypted_png, PNG_KEY) == png)
+    print("PDF round-trips:", xor_bytes(encrypted_pdf, PDF_KEY) == pdf)
+    print("PNG has PNG signature:", png.startswith(SIGNATURES["png"]))
+    print("PDF has PDF signature:", pdf.startswith(SIGNATURES["pdf"]))
+    return png, encrypted_png, pdf, encrypted_pdf
 
 
-print(f"Identified file type for encrypted PNG: {identify_filetype(encrypted_png)}")
+def check_find_period() -> None:
+    """find_period on known inputs: expect 7, 3, 8."""
+    print(find_period(b"XORacleX"), find_period(b"keyke"), find_period(b"abcdefgh"))
 
-#CHECKPPIT FOR HEADER AND KNOWN PARTS
-known = known_keystream(encrypted_png, KNOWN_PARTS["png"])
-print(len(known))                      # 28
-print(min(known), max(known))          # 0  and  len(png_cipher) - 1
-print(known[0], ord("X"))              # 88 88
 
-rng = random.Random(42)
-for L in [7, 12, 16, 20, 24, 28, 29, 35]:
-    key = rng.randbytes(L)
-    cipher = xor_bytes(data_png, key)
-    found = recover_long_key(cipher, "png")
-    print(f"key length {L:2d}: {'OK' if found == key else 'FAILED'}")
+def header_attack(encrypted_png: bytes, encrypted_pdf: bytes) -> None:
+    """Header-only attack: K = C ^ P on the signature bytes.
 
-print(L, found)
+    The right signature gives a keystream that repeats (the real key);
+    wrong ones give random-looking bytes with no repetition.
+    """
+    print("PNG keystream:", keystream_from_header(encrypted_png, SIGNATURES["png"]))
+    print("PDF keystream:", keystream_from_header(encrypted_pdf, SIGNATURES["pdf"]))
+
+    result = recover_with_signature(encrypted_pdf, "pdf")
+    print("PDF key from header:", result[0] if result else "not visible (key longer than header)")
+    result = recover_with_signature(encrypted_png, "png")
+    print("PNG key from header:", result[0] if result else "not visible (key longer than header)")
+
+    print("Every signature tried on the encrypted PNG:")
+    for filetype, header in SIGNATURES.items():
+        stream = keystream_from_header(encrypted_png, header)
+        print(f"   {filetype}: keystream {stream!r}, period {find_period(stream)}")
+
+    print("Identified PNG as:", identify_filetype(encrypted_png))
+    print("Identified PDF as:", identify_filetype(encrypted_pdf))
+
+
+def check_known_keystream(encrypted_png: bytes) -> None:
+    """Known plaintext at both ends of a PNG: expect 28 positions,
+    from 0 to the last byte of the file."""
+    known = known_keystream(encrypted_png, KNOWN_PARTS["png"])
+    print("Known key bytes:", len(known), "| positions", min(known), "to", max(known),
+          "| file length", len(encrypted_png))
+
+
+def long_key_test(png: bytes) -> None:
+    """Long-key attack on random keys of growing length.
+
+    28 known bytes can cover at most 28 key positions, so recovery stops
+    working somewhere around that length.
+    """
+    rng = random.Random(SEED)
+    for length in LONG_KEY_LENGTHS:
+        key = rng.randbytes(length)
+        found = recover_long_key(xor_bytes(png, key), "png")
+        print(f"key length {length:2d}: {'OK' if found == key else 'FAILED'}")
+
+
+def main() -> None:
+    print("===== Encrypting samples =====")
+    png, encrypted_png, pdf, encrypted_pdf = encrypt_samples()
+    print("\n===== find_period =====")
+    check_find_period()
+    print("\n===== Header-only attack =====")
+    header_attack(encrypted_png, encrypted_pdf)
+    print("\n===== Known bytes at both ends =====")
+    check_known_keystream(encrypted_png)
+    print("\n===== Long-key attack =====")
+    long_key_test(png)
+
+
+if __name__ == "__main__":
+    main()
