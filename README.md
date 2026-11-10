@@ -46,8 +46,6 @@ If the key is shorter than the data, it repeats. That repetition, together with 
 - [x] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
   - [x] Two messages: guided crib dragging
   - [x] Many messages: automatic column attack (reuses Phase 2)
-- [ ] **CLI**: `xoracle encrypt | decrypt | crack | identify`
-- [ ] **Stretch**: break XOR-obfuscated UDP traffic from my FPGA Ethernet project
 
 ---
 
