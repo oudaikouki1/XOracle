@@ -40,7 +40,9 @@ If the key is shorter than the data, it repeats. That repetition, together with 
   - [x] v3: chi-squared test
 - [x] **Phase 3: Break repeating-key XOR.** Guess the key length with Hamming distance, then split the problem into single-byte columns.
   - [ ] Majority vote across key copies (fixes overfitting on medium-length texts)
-- [ ] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
+- [x] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
+  - [x] Header-only attack + automatic file-type identification
+  - [x] Keys longer than the header, using known bytes at both ends of the file
 - [ ] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
 - [ ] **CLI**: `xoracle encrypt | decrypt | crack | identify`
 - [ ] **Stretch**: break XOR-obfuscated UDP traffic from my FPGA Ethernet project
@@ -56,12 +58,16 @@ XOracle/
 ├── single_byte.py  # crack, best_key: Phase 2 single-byte breaker
 ├── repeating.py    # hamming_distance, keysize_score, guess_keysizes, transpose,
 │                   # shortest_period, recover_key, break_repeating_xor
-├── test.py         # Phase 2 scorer comparison + Phase 3 stress test
-├── samples/        # plain.txt: test plaintext
+├── known_plain.py  # SIGNATURES, KNOWN_PARTS, keystream_from_header, find_period,
+│                   # recover_with_signature, identify_filetype,
+│                   # known_keystream, key_for_length, recover_long_key
+├── make_files.py   # encrypts the sample PNG and PDF with known keys
+├── test.py         # Phase 2 scorer comparison, Phase 3 and 4 stress tests
+├── samples/        # plain.txt, img.png, sample.pdf and their encrypted versions
 └── README.md
 ```
 
-The layout will grow as new phases are added (known_plain.py, crib.py, cli.py, tests/).
+The layout will grow as new phases are added (crib.py, cli.py, tests/).
 
 ---
 
@@ -199,6 +205,91 @@ Multiples still win on medium texts, where the overfitting gain exceeds 10%. The
 - **Similar key bytes hide the key length.** `ICE` = `0x49 0x43 0x45`: the bytes differ in only a few bits, so wrong lengths looked almost as good as the right one. Comparing only 4 blocks made it invisible. Using **every** block in the ciphertext fixed it.
 - **Multiples tie with the real length.** For `Xor!`, lengths 4, 8, 12… 40 all scored about 2.7, with the order decided by noise. The GCD of the top candidates gives 4.
 
+### Phase 4: known-plaintext attack on files
+
+Phases 2 and 3 guess the key with **statistics**, which only works when the plaintext is English. Images, PDFs and archives aren't text, but they have something better: **bytes whose values are known in advance.**
+
+#### The idea
+
+Almost every file format starts with a fixed *signature* (magic number):
+
+| Type | First bytes |
+|---|---|
+| PNG | `89 50 4E 47 0D 0A 1A 0A` |
+| PDF | `%PDF-` |
+| ZIP / DOCX / XLSX | `PK\x03\x04` |
+| ELF | `\x7fELF` |
+| GIF | `GIF89a` |
+
+If you know part of the plaintext, XOR hands you the key directly:
+
+```
+C = P ⊕ K   →   K = C ⊕ P
+```
+
+No brute force, no scoring: one XOR. This is how analysts break XOR-obfuscated malware payloads: guess "this is probably a ZIP or an executable", and the header gives up the key.
+
+#### Header-only attack
+
+1. `keystream_from_header`: XOR the first ciphertext bytes with the signature.
+2. `find_period`: find where that keystream starts repeating. That's the key length.
+3. `recover_with_signature`: slice the key and decrypt the whole file.
+4. `identify_filetype`: try every signature, and keep the one whose keystream repeats.
+
+| File | Key | Keystream revealed | Period | Result |
+|---|---|---|---|---|
+| PNG | `XORacle` (7) | `XORacleX` | 7 | ✅ image opens |
+| PDF | `key` (3) | `keyke` | 3 | ✅ PDF opens |
+
+**How it tells the file type:** with the right signature, the keystream *is* the key, so it repeats. With a wrong one, it's random-looking bytes with no repetition:
+
+| Guess on the PNG | Keystream | Period | Repeats? |
+|---|---|---|---|
+| **png** | `XORacleX` | **7** | ✅ |
+| pdf | `\xf4OX`C` | 5 | no |
+| zip | `\x81T\x1f"` | 4 | no |
+| elf | `\xaeZP`` | 4 | no |
+| gif | `\x96VZ\x1eW\x07` | 6 | no |
+
+**Limit:** the header only reveals as many key bytes as it has. A key longer than the signature never shows a repeat, so the file is reported as `"unknown"`.
+
+#### Breaking keys longer than the header
+
+A PNG has fixed bytes at **both ends**:
+
+| Where | Known bytes |
+|---|---|
+| Start (16 bytes) | signature + IHDR chunk length + `IHDR` |
+| End (12 bytes) | the `IEND` chunk: `00 00 00 00 49 45 4E 44 AE 42 60 82` |
+
+That's 28 known bytes. With key length `L`, the byte at position `pos` was encrypted by key byte `pos % L`. So for each candidate `L`:
+
+- **Contradiction:** two known positions land on the same key byte but give different values, so `L` is impossible.
+- **Gap:** some key byte is never covered, so `L` can't be completed.
+- Otherwise, the key is fully determined.
+
+The smallest `L` with no contradiction and no gap is the key length. Its multiples are also consistent, as in Phase 3, but here the check is **exact**, so no statistics or tolerance are needed.
+
+#### Results: random keys on a real PNG
+
+| Key length | 7 | 12 | 16 | 20 | 24 | 28 | 29 | 35 |
+|---|---|---|---|---|---|---|---|---|
+| Header only | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Header + IEND | ✅ | ✅ | ✅ | ✅ | ✅ | ✗ | ✗ | ✗ |
+
+**From 7 bytes to 24 bytes** by using known plaintext from a second place in the file.
+
+**Why it stops at about 28:** a key of length `L` has `L` slots, and 28 known bytes can fill at most 28 of them. At exactly 28, it would only work if the IEND bytes landed precisely on the slots the start didn't cover, which depends on `(file length − 12) mod 28`. In practice they overlap, and some slots stay empty. **The rule: a key is recoverable when the known plaintext covers every key position at least once.**
+
+#### The one-time-pad connection
+
+If the key is as long as the file, it has as many slots as the file has bytes, and 28 known bytes reveal 28 key bytes and **nothing else**. Without repetition, knowing part of the plaintext says nothing about the rest. That's exactly why a true one-time pad is unbreakable, unless the same pad is used twice (Phase 5).
+
+#### Bugs found along the way
+
+- **Half the known plaintext silently ignored.** Negative offsets (counted from the end) were treated as invalid positions and skipped, so only the start bytes were used. No error, just missing data. Fix: convert `-12` to `len(file) - 12` first.
+- **"Everything fails" in the stress test** came from the test, not the attack: arguments to `xor_bytes` were swapped (the output was only `L` bytes long), and the image was encrypted twice. Lesson: when every case fails, check the shared code first.
+
 ---
 
 ## Lessons learned
@@ -215,6 +306,9 @@ Multiples still win on medium texts, where the overfitting gain exceeds 10%. The
 - Diagnose before fixing. I assumed the key-length guesser was failing; one print showed it was right every time and the real problem was elsewhere.
 - More free parameters fit the data better, but not always more truthfully. A longer key overfits, as in machine learning, and the simplest good-enough answer is usually the right one.
 - Real data is messy. Text copied from the web is UTF-8, not ASCII, and a scorer that's too strict rejects the right answer.
+- Known plaintext beats statistics. A few predictable bytes recover a key instantly, where frequency analysis needs thousands of bytes of English.
+- File formats are full of predictable bytes: signatures, chunk names, trailers. Every one is a crib for an attacker.
+- Repetition is the weakness. Every attack so far exploits a key that repeats, and a key that never repeats (a true one-time pad) leaks nothing.
 
 ---
 
