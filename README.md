@@ -38,7 +38,8 @@ If the key is shorter than the data, it repeats. That repetition, together with 
   - [x] v1: character-class scoring (letters, spaces, garbage penalty)
   - [x] v2: letter-frequency scoring
   - [x] v3: chi-squared test
-- [ ] **Phase 3: Break repeating-key XOR.** Guess the key length with Hamming distance, then split the problem into single-byte columns.
+- [x] **Phase 3: Break repeating-key XOR.** Guess the key length with Hamming distance, then split the problem into single-byte columns.
+  - [ ] Majority vote across key copies (fixes overfitting on medium-length texts)
 - [ ] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
 - [ ] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
 - [ ] **CLI**: `xoracle encrypt | decrypt | crack | identify`
@@ -50,13 +51,17 @@ If the key is shorter than the data, it repeats. That repetition, together with 
 
 ```
 XOracle/
-├── core.py        # xor_bytes: the XOR primitive
-├── scoring.py     # english_score, frequency_score, chi_squared_score
-├── test.py        # cracks test sentences with every scorer and compares them
+├── core.py         # xor_bytes: the XOR primitive
+├── scoring.py      # english_score, frequency_score, chi_squared_score
+├── single_byte.py  # crack, best_key: Phase 2 single-byte breaker
+├── repeating.py    # hamming_distance, keysize_score, guess_keysizes, transpose,
+│                   # shortest_period, recover_key, break_repeating_xor
+├── test.py         # Phase 2 scorer comparison + Phase 3 stress test
+├── samples/        # plain.txt: test plaintext
 └── README.md
 ```
 
-The layout will grow as new phases are added (single_byte.py, repeating.py, known_plain.py, crib.py, cli.py, tests/).
+The layout will grow as new phases are added (known_plain.py, crib.py, cli.py, tests/).
 
 ---
 
@@ -82,7 +87,7 @@ Three scorers, each one built to fix the weaknesses found in the one before:
 
 - **v1, character classes:** lowercase/space +2, uppercase +1, common punctuation 0, anything else −5. Higher is better.
 - **v2, letter frequency:** each letter adds its frequency in English (`e` ≈ 0.127, `z` ≈ 0.0007); non-printable bytes −0.5. Higher is better.
-- **v3, chi-squared:** compares the whole character distribution (26 letters + space + "other") with English. Control or non-ASCII bytes are rejected outright. Lower is better.
+- **v3, chi-squared:** compares the whole character distribution (26 letters + space + "other") with English. Control bytes are rejected outright; non-ASCII bytes count as "other" (see Phase 3). Lower is better.
 
 #### Results (`python test.py`)
 
@@ -106,7 +111,7 @@ All three scorers find the key, but v3 does it with about 2–3× more margin th
 My first v3 put the correct key at **#129–#142**. Each fix came from reading what was beating it:
 
 1. **Pure garbage scored a perfect 0.** With no letters to count, every term was skipped. Fix: return `inf` when there's nothing to count.
-2. **The case-flip key nearly won.** XOR with `0x78` turns `WANT` into `want` (invisible after `.lower()`) and spaces into `\x00` (ignored). Fix: reject control and non-ASCII bytes.
+2. **The case-flip key nearly won.** XOR with `0x78` turns `WANT` into `want` (invisible after `.lower()`) and spaces into `\x00` (ignored). Fix: reject control bytes.
 3. **Few letters plus lots of symbols won.** Only letters were counted, so `,E)*3 E2*7.,+"E*01` was judged on 4 letters. Fix: count every byte, with symbols in an `"other"` category.
 4. **Expected counts didn't add up.** The table had no `"other"` entry and didn't sum to 1. Fix: rescale letters to 83%, space 15%, other 2%.
 
@@ -117,6 +122,82 @@ My first v3 put the correct key at **#129–#142**. Each fix came from reading w
 - v1 told English from garbage mostly by the **spaces**: under the wrong key, spaces became `?`, which my scorer treated as neutral punctuation.
 - Penalties only mean something relative to rewards. Switching the frequency table from percent to fractions left the old −5 penalty about 40× bigger than the best letter's reward.
 - Text with digits is the hardest case: the real plaintext pays a penalty for its digits, while the wrong key turns them into neutral punctuation.
+
+### Phase 3: breaking repeating-key XOR
+
+Given only a ciphertext encrypted with a repeating key (`ICE` → `ICEICEICE…`), recover the key and the plaintext.
+
+#### The attack
+
+```
+ciphertext
+  │
+  ├─ 1. guess_keysizes    which key lengths are likely?        (Hamming distance)
+  ├─ 2. transpose         one column per key byte
+  ├─ 3. best_key          break each column as single-byte XOR  (Phase 2, chi-squared)
+  ├─ 4. shortest_period   ICEICEICE → ICE
+  └─ 5. pick the winner   decrypt with each candidate, score with chi-squared
+                          → shortest key within 10% of the best score
+```
+
+**Step 1: finding the key length.** Cut the ciphertext into blocks of `k` bytes and measure the Hamming distance (differing bits) between consecutive blocks. If `k` is the real length, both blocks were encrypted with the same key bytes, so the key cancels out:
+
+```
+(P1 ⊕ K) ⊕ (P2 ⊕ K) = P1 ⊕ P2
+```
+
+That leaves two pieces of English, which differ in fewer bits than random bytes. The lowest normalized distance points to the key length **and its multiples**. Taking the GCD of the top candidates recovers the real length.
+
+**Step 2: transposing.** Once the length is known, every k-th byte was encrypted with the same key byte:
+
+```
+ciphertext:  A B C D E F G H I J     key length 3
+key:         I C E I C E I C E I
+column 0:    A     D     G     J  →  single-byte XOR with 'I'
+column 1:      B     E     H      →  single-byte XOR with 'C'
+column 2:        C     F     I    →  single-byte XOR with 'E'
+```
+
+One hard problem becomes `k` easy ones, each solved with the Phase 2 breaker.
+
+#### Results: stress test (`python test.py`)
+
+Random keys (seed 42) of 4 lengths × 5 plaintext lengths, from a 3,245-byte English text. *Bytes/col* = text length ÷ key length, the amount of data each column gets.
+
+| Key length | 3,245 bytes | 1,000 | 500 | 200 | 100 |
+|---|---|---|---|---|---|
+| 3 | ✅ | ✗ length (27) | ✗ length (24) | ✗ length (39) | ✗ length (27) |
+| 7 | ✅ | ✗ length (28) | ✗ length (28) | ✗ length (35) | ~ 3 bytes wrong |
+| 16 | ✅ | ✗ length (32) | ✗ length (32) | ~ 5 bytes wrong | ~ 11 bytes wrong |
+| 29 | ✅ | ✅ | ~ 3 bytes wrong | ~ 13 bytes wrong | ~ 18 bytes wrong |
+
+✅ key recovered exactly · ~ right length, some bytes wrong · ✗ wrong length (found length in brackets)
+
+**Every key is recovered from the full text.** Below that, there are two kinds of failure:
+
+1. **Too little data per column** (key 29 on short texts). With 3–17 bytes per column, chi-squared can't reliably pick the right byte. This is the same limit as `Hi` in Phase 2, and no tuning fixes it. Even so, the partly correct key gives partly readable text (`rIt WiLD… triTITs… the`), which an attacker could finish by hand.
+2. **A multiple of the key length wins** (keys 3, 7 and 16 on medium texts). Every wrong length found was an exact multiple of the real one.
+
+#### Debugging the "wrong length" failures
+
+My first guess was that `guess_keysizes` missed the real length. A diagnostic showed the opposite: **the real length was in the candidate list every time.** Chi-squared was choosing a multiple instead.
+
+The reason is **overfitting**. With key length 27 instead of 3, the text is split into 27 small columns instead of 3 large ones, and each column picks its own best byte. A slightly wrong byte can fit a small column's noise a little better, and with 27 independent choices, the long key tunes itself to this specific text. Its decryption ends up scoring slightly *better* than the real key's, even though it's wrong in places.
+
+**Fix:** among candidates scoring within 10% of the best, take the **shortest** key. This is Occam's razor: a multiple overfits by a few percent, while a truly wrong length scores far worse.
+
+| | Exact recoveries (of 20) | Wrong-length failures |
+|---|---|---|
+| Lowest score wins | 4 | 13 |
+| Shortest key within 10% | **5** | **9** |
+
+Multiples still win on medium texts, where the overfitting gain exceeds 10%. The next step is a **majority vote** across the copies of the key: a 27-byte result like `ICEIXEICE…` is mostly correct copies of `ICE`, so voting per position would recover it.
+
+#### Bugs found along the way
+
+- **One `ä` broke everything.** The first full run returned `b'\x00\x00\x00'`. The plaintext contained `Tannhäuser` and curly quotes, which are UTF-8 bytes above `0x7E`, and the scorer rejected any candidate containing one, **including the correct key**. All 256 keys tied at `inf`, so key 0 won. Fix: reject only control bytes (which never appear in text) and count high bytes as "other".
+- **Similar key bytes hide the key length.** `ICE` = `0x49 0x43 0x45`: the bytes differ in only a few bits, so wrong lengths looked almost as good as the right one. Comparing only 4 blocks made it invisible. Using **every** block in the ciphertext fixed it.
+- **Multiples tie with the real length.** For `Xor!`, lengths 4, 8, 12… 40 all scored about 2.7, with the order decided by noise. The GCD of the top candidates gives 4.
 
 ---
 
@@ -130,6 +211,10 @@ My first v3 put the correct key at **#129–#142**. Each fix came from reading w
 - Measure improvements. A before/after number beats "it seems better".
 - Compare fairly: measure each method against its *own* best competitor, not against one picked for another method.
 - When a scorer fails, print what beat it. Every fix to chi-squared came from reading the winning impostor.
+- Split a hard problem into ones you've already solved: repeating-key XOR is just `k` single-byte problems.
+- Diagnose before fixing. I assumed the key-length guesser was failing; one print showed it was right every time and the real problem was elsewhere.
+- More free parameters fit the data better, but not always more truthfully. A longer key overfits, as in machine learning, and the simplest good-enough answer is usually the right one.
+- Real data is messy. Text copied from the web is UTF-8, not ASCII, and a scorer that's too strict rejects the right answer.
 
 ---
 
@@ -145,3 +230,6 @@ My first v3 put the correct key at **#129–#142**. Each fix came from reading w
 
 Everything here is for learning. All attacks are tested only on data I generated and encrypted myself.
 
+## License
+
+MIT
