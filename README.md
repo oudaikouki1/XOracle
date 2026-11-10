@@ -4,7 +4,7 @@
 
 XOracle is a Python toolkit I'm building to learn cryptanalysis by doing it. It implements XOR "encryption" and then attacks it from several angles, showing step by step why XOR on its own is not real encryption.
 
-> 🚧 **Work in progress.** I'm building this one phase at a time; see the [roadmap](#roadmap).
+> ✅ **Completed.** All five attack phases are implemented, tested on my own data and documented below. Possible extensions are listed under [Future work](#future-work).
 
 ---
 
@@ -39,13 +39,21 @@ If the key is shorter than the data, it repeats. That repetition, together with 
   - [x] v2: letter-frequency scoring
   - [x] v3: chi-squared test
 - [x] **Phase 3: Break repeating-key XOR.** Guess the key length with Hamming distance, then split the problem into single-byte columns.
-  - [ ] Majority vote across key copies (fixes overfitting on medium-length texts)
 - [x] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
   - [x] Header-only attack + automatic file-type identification
   - [x] Keys longer than the header, using known bytes at both ends of the file
 - [x] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
   - [x] Two messages: guided crib dragging
   - [x] Many messages: automatic column attack (reuses Phase 2)
+
+### Future work
+
+Ideas I may come back to; they're not part of the completed project:
+
+- Majority vote across key copies, to fix overfitting on medium-length texts (Phase 3)
+- Known end-of-file bytes for more formats than PNG (Phase 4)
+- A `tests/` folder with automated checks
+- Break XOR-obfuscated UDP traffic from my FPGA Ethernet project
 
 ---
 
@@ -63,13 +71,13 @@ XOracle/
 │                   # known_keystream, key_for_length, recover_long_key
 ├── crib.py         # xor_ciphertexts, crib_drag, crib_hits, guided session,
 │                   # break_many_time_pad
-├── make_files.py   # encrypts the sample PNG and PDF with known keys
-├── test.py         # Phase 2 scorer comparison, Phase 3 and 4 stress tests
-├── samples/        # plain.txt, img.png, sample.pdf and their encrypted versions
+├── make_file.py    # encrypts the sample PNG and PDF with known keys
+├── make_sample.py  # encrypts plain.txt and runs the Phase 3 attack
+├── test.py         # Phase 2 scorer comparison
+├── test_crib.py    # Phase 5 experiments
+├── samples/        # plain.txt, img.png, sample.pdf
 └── README.md
 ```
-
-Next: `cli.py` (one command for every phase) and a `tests/` folder.
 
 ---
 
