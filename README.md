@@ -43,7 +43,9 @@ If the key is shorter than the data, it repeats. That repetition, together with 
 - [x] **Phase 4: Known-plaintext attack on files.** Recover keys from file signatures (PNG, PDF, ZIP, ELF...).
   - [x] Header-only attack + automatic file-type identification
   - [x] Keys longer than the header, using known bytes at both ends of the file
-- [ ] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
+- [x] **Phase 5: Reused one-time pad.** Interactive crib dragging on `C1 ⊕ C2 = P1 ⊕ P2`.
+  - [x] Two messages: guided crib dragging
+  - [x] Many messages: automatic column attack (reuses Phase 2)
 - [ ] **CLI**: `xoracle encrypt | decrypt | crack | identify`
 - [ ] **Stretch**: break XOR-obfuscated UDP traffic from my FPGA Ethernet project
 
@@ -61,13 +63,15 @@ XOracle/
 ├── known_plain.py  # SIGNATURES, KNOWN_PARTS, keystream_from_header, find_period,
 │                   # recover_with_signature, identify_filetype,
 │                   # known_keystream, key_for_length, recover_long_key
+├── crib.py         # xor_ciphertexts, crib_drag, crib_hits, guided session,
+│                   # break_many_time_pad
 ├── make_files.py   # encrypts the sample PNG and PDF with known keys
 ├── test.py         # Phase 2 scorer comparison, Phase 3 and 4 stress tests
 ├── samples/        # plain.txt, img.png, sample.pdf and their encrypted versions
 └── README.md
 ```
 
-The layout will grow as new phases are added (crib.py, cli.py, tests/).
+Next: `cli.py` (one command for every phase) and a `tests/` folder.
 
 ---
 
@@ -290,6 +294,76 @@ If the key is as long as the file, it has as many slots as the file has bytes, a
 - **Half the known plaintext silently ignored.** Negative offsets (counted from the end) were treated as invalid positions and skipped, so only the start bytes were used. No error, just missing data. Fix: convert `-12` to `len(file) - 12` first.
 - **"Everything fails" in the stress test** came from the test, not the attack: arguments to `xor_bytes` were swapped (the output was only `L` bytes long), and the image was encrypted twice. Lesson: when every case fails, check the shared code first.
 
+### Phase 5: the reused one-time pad
+
+A one-time pad (a random key as long as the message, used once) is provably unbreakable. Phase 4 showed why: with no repetition, knowing part of the plaintext reveals nothing else. This phase breaks the classic mistake of **using the same pad twice**.
+
+#### The key cancels out
+
+```
+C1 = P1 ⊕ K
+C2 = P2 ⊕ K
+C1 ⊕ C2 = (P1 ⊕ K) ⊕ (P2 ⊕ K) = P1 ⊕ P2
+```
+
+From the two ciphertexts alone, an attacker gets the two plaintexts XORed together, and the pad is gone. That isn't readable yet, but it's no longer random. This is what happened in the **Venona project**, where reused Soviet pads were broken for decades.
+
+#### What `P1 ⊕ P2` already leaks
+
+Test messages: `This is the first plaintext message.` and `This is the second plaintext message.`
+
+```
+\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x15\x0c\x11\x1c\x1aDP\x1c\r…
+```
+
+- **12 zero bytes:** `a ⊕ a = 0`, so both messages start with the same 12 characters. An attacker sees this without knowing a single letter.
+- **Letters in the noise (`D`, `P`, `T`, `M`, `K`):** `' ' ⊕ 'a' = 'A'`. Where one message has a space and the other a letter, `P1 ⊕ P2` shows that letter with its case flipped.
+
+#### Crib dragging
+
+Guess a word that's probably in one message (a *crib*) and slide it along `P1 ⊕ P2`:
+
+```
+X ⊕ P1 = (P1 ⊕ P2) ⊕ P1 = P2
+```
+
+At the right position, the other message appears as readable text. At wrong positions you get garbage. Every correct guess reveals the other message **and the pad** at that position, and each newly revealed fragment suggests the next guess, back and forth like a zipper:
+
+```
+                                  1: ????????????????????????????????????
+                                  2: ????????????????????????????????????
+msg 1, pos  0, "This is the "  →  1: This is the ????????????????????????
+                                  2: This is the ????????????????????????
+msg 1, pos 12, "first"         →  1: This is the first???????????????????
+                                  2: This is the secon???????????????????
+msg 2, pos 12, "second "       →  1: This is the first p?????????????????
+                                  2: This is the second ?????????????????
+msg 1, pos 17, " plaintext "   →  1: This is the first plaintext ????????
+                                  2: This is the second plaintext????????
+msg 1, pos 27, " message."     →  1: This is the first plaintext message.
+                                  2: This is the second plaintext message
+```
+
+Both messages were recovered, and `C1 ⊕ P1` reproduced the pad exactly.
+
+**A wrong guess shows itself immediately.** Placing `laintext ` one position too early turned the other message into `<}dfsii,`. That's the built-in check of crib dragging.
+
+**Limits:**
+- In regions where both messages are identical, `P1 ⊕ P2` is all zeros, so every crib "fits". You learn that the messages are equal there, not what they say.
+- Positions beyond the shorter message can't be recovered from two ciphertexts.
+
+#### Many messages with one pad: fully automatic
+
+If the same pad encrypts many messages, byte `i` of every message was XORed with the same pad byte. So each **column** is a single-byte XOR problem, and the Phase 2 breaker solves it with no guessing, the same idea as the columns in Phase 3.
+
+| Messages sharing the pad | Pad bytes wrong | Message 1, decrypted |
+|---|---|---|
+| 4 | 18 / 38 | `lDet met r thE O @ b idgE at HiRO  ONa` |
+| 8 | 8 / 38 | `mEet me ar thC olD bridge at niRe tSNi` |
+| 15 | 5 / 38 | `mDet me at the old bridgy at niRe toNi` |
+
+The more messages, the more bytes per column, and the better the result: the same "enough data per column" rule as Phase 3. Many remaining errors are only wrong capitalisation (`mDet`), because chi-squared ignores case.
+
 ---
 
 ## Lessons learned
@@ -309,6 +383,8 @@ If the key is as long as the file, it has as many slots as the file has bytes, a
 - Known plaintext beats statistics. A few predictable bytes recover a key instantly, where frequency analysis needs thousands of bytes of English.
 - File formats are full of predictable bytes: signatures, chunk names, trailers. Every one is a crib for an attacker.
 - Repetition is the weakness. Every attack so far exploits a key that repeats, and a key that never repeats (a true one-time pad) leaks nothing.
+- "Unbreakable" depends on how a system is used. A one-time pad used twice is broken by the same XOR property that makes it work.
+- The same few ideas keep coming back: XOR cancels itself, columns turn one hard problem into many easy ones, and English has statistics that noise doesn't.
 
 ---
 
@@ -317,6 +393,7 @@ If the key is as long as the file, it has as many slots as the file has bytes, a
 - Laurens Van Houtven, *Crypto 101*: chapters on XOR and stream ciphers
 - [Letter frequency, Wikipedia](https://en.wikipedia.org/wiki/Letter_frequency)
 - [Cryptopals challenges, Set 1](https://cryptopals.com/sets/1)
+- [Venona project, Wikipedia](https://en.wikipedia.org/wiki/Venona_project)
 
 ---
 
